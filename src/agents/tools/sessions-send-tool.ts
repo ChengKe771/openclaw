@@ -15,6 +15,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { callGateway } from "../../gateway/call.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import {
+  buildAgentMainSessionKey,
   isSubagentSessionKey,
   normalizeAgentId,
   resolveAgentIdFromSessionKey,
@@ -558,18 +559,43 @@ export function createSessionsSendTool(opts?: {
       }
 
       const requesterSessionKey = opts?.agentSessionKey ? effectiveRequesterKey : undefined;
+      // When dmScope is "main", DMs route to agent:{agentId}:{mainKey}.
+      // A session originally created under a per-peer / per-channel-peer /
+      // per-account-channel-peer regime stores a key like
+      //   agent:main:feishu:default:direct:ou_XXXX
+      // Embedding that stale key in inter-session provenance causes the
+      // receiving agent to reply into a ghost session the sender never
+      // monitors — permanent one-way communication failure.
+      //
+      // Only canonicalize keys whose parsed rest contains a "direct" peer-kind
+      // segment (legacy DM keys). Group, cron, hook, subagent, and other
+      // non-DM callers must preserve their exact session key for correct
+      // routing, watch registration, and A2A ping-pong bookkeeping.
+      const parsedRequester = requesterSessionKey
+        ? parseAgentSessionKey(requesterSessionKey)
+        : null;
+      const isLegacyDmRequester = parsedRequester
+        ? parsedRequester.rest.split(":").includes("direct")
+        : false;
+      const normalizedRequesterKey =
+        requesterSessionKey && (cfg.session?.dmScope ?? "main") === "main" && isLegacyDmRequester
+          ? buildAgentMainSessionKey({
+              agentId: resolveAgentIdFromSessionKey(requesterSessionKey),
+              mainKey,
+            })
+          : requesterSessionKey;
       const requesterChannel = opts?.agentChannel;
-      const sameSessionA2A = requesterSessionKey === resolvedKey;
-      const isIsolatedCronRequester = isCronRunSessionKey(requesterSessionKey);
+      const sameSessionA2A = normalizedRequesterKey === resolvedKey;
+      const isIsolatedCronRequester = isCronRunSessionKey(normalizedRequesterKey);
       // Watch registration follows successful dispatch: a failed send must not leave
       // a hidden watch, and cron run-scoped sends can fall back to the durable parent
       // session, which is the key that receives future state changes.
       const watchRequested = params.watch === true;
       const registerWatchIfRequested = (targetSessionKey: string) => {
         const watched =
-          watchRequested && requesterSessionKey && requesterSessionKey !== targetSessionKey
+          watchRequested && normalizedRequesterKey && normalizedRequesterKey !== targetSessionKey
             ? registerSessionStateWatch({
-                watcherSessionKey: requesterSessionKey,
+                watcherSessionKey: normalizedRequesterKey,
                 targetSessionKey,
               })
             : false;
@@ -613,13 +639,13 @@ export function createSessionsSendTool(opts?: {
           : undefined;
 
       const agentMessageContext = buildAgentToAgentMessageContext({
-        requesterSessionKey,
+        requesterSessionKey: normalizedRequesterKey,
         requesterChannel,
         targetSessionKey: displayKey,
       });
       const inputProvenance = {
         kind: "inter_session" as const,
-        sourceSessionKey: requesterSessionKey,
+        sourceSessionKey: normalizedRequesterKey,
         sourceChannel: requesterChannel,
         sourceTool: "sessions_send",
       };
@@ -699,7 +725,7 @@ export function createSessionsSendTool(opts?: {
           // Cron runs are isolated jobs; target replies must not become new
           // requester turns, but the target-side announce still runs.
           maxPingPongTurns: isIsolatedCronRequester ? 0 : maxPingPongTurns,
-          requesterSessionKey,
+          requesterSessionKey: normalizedRequesterKey,
           requesterChannel,
           baseline: flowBaseline,
           roundOneReply,
