@@ -96,7 +96,11 @@ import {
   normalizeMainKey,
   parseAgentSessionKey,
 } from "../routing/session-key.js";
-import { isAcpSessionKey, isCronRunSessionKey } from "../sessions/session-key-utils.js";
+import {
+  isAcpSessionKey,
+  isCronRunSessionKey,
+  isCronSessionKey,
+} from "../sessions/session-key-utils.js";
 import { resolveNonNegativeNumber } from "../shared/number-coercion.js";
 import { truncateUtf16Safe } from "../utils.js";
 import { normalizeSessionDeliveryFields } from "../utils/delivery-context.shared.js";
@@ -1105,6 +1109,9 @@ function classifySessionKey(key: string, entry?: SessionEntry): GatewaySessionRo
   }
   if (entry?.chatType === "group" || entry?.chatType === "channel") {
     return "group";
+  }
+  if (isCronSessionKey(key)) {
+    return "cron";
   }
   if (key.includes(":group:") || key.includes(":channel:")) {
     return "group";
